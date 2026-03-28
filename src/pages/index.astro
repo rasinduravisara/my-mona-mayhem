@@ -1,5 +1,25 @@
 ---
+interface ContributionDay {
+	weekday: number;
+	count: number;
+	level: number;
+}
 
+interface ContributionWeek {
+	index: number;
+	first_day: string;
+	contribution_days: ContributionDay[];
+}
+
+interface ContributionResponse {
+	schema: string;
+	generated_at: string;
+	from: string;
+	to: string;
+	total_contributions: number;
+	colors_full?: string[];
+	weeks: ContributionWeek[];
+}
 ---
 
 <html lang="en">
@@ -8,10 +28,672 @@
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
-		<title>Mona Mayhem</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+		<title>Mona Mayhem - GitHub Contribution Battle Arena</title>
 	</head>
 	<body>
-		<h1>Mona Mayhem</h1>
-		<p>Welcome to Mona Mayhem! Time to build a GitHub Contribution Battle Arena.</p>
+		<main class="arena">
+			<header class="hero">
+				<h1>Mona Mayhem - GitHub Contribution Battle Arena</h1>
+				<p>Enter two GitHub usernames and compare yearly contribution activity.</p>
+			</header>
+
+			<section class="panel" aria-label="Battle setup">
+				<form id="battle-form" class="battle-form">
+					<div class="inputs">
+						<div class="field">
+							<label for="player1">Player 1</label>
+							<input id="player1" name="player1" type="text" placeholder="octocat" required maxlength="39" autocomplete="off" />
+						</div>
+						<div class="field">
+							<label for="player2">Player 2</label>
+							<input id="player2" name="player2" type="text" placeholder="torvalds" required maxlength="39" autocomplete="off" />
+						</div>
+					</div>
+					<button id="battle-button" type="submit">Battle!</button>
+				</form>
+			</section>
+
+			<section class="panel status" aria-live="polite">
+				<p id="loading-message" hidden>Loading contribution data...</p>
+				<p id="error-message" class="error" hidden></p>
+			</section>
+
+			<section id="results" class="panel results" hidden>
+				<h2>Battle Results</h2>
+				<p id="winner" class="winner"></p>
+				<div class="battle-results-grid">
+					<article class="card">
+						<h3 id="player1-name">Player 1</h3>
+						<p><strong>Total Contributions:</strong> <span id="player1-total">0</span></p>
+						<p><strong>Date Range:</strong> <span id="player1-range">-</span></p>
+						<div id="player1-graph" class="graph" aria-label="Player 1 contribution graph"></div>
+					</article>
+					<div class="vs-badge" aria-hidden="true">VS</div>
+					<article class="card">
+						<h3 id="player2-name">Player 2</h3>
+						<p><strong>Total Contributions:</strong> <span id="player2-total">0</span></p>
+						<p><strong>Date Range:</strong> <span id="player2-range">-</span></p>
+						<div id="player2-graph" class="graph" aria-label="Player 2 contribution graph"></div>
+					</article>
+				</div>
+			</section>
+		</main>
+
+		<script type="module">
+			const usernamePattern = /^(?!-)[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+			const fallbackPalette = ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'];
+
+			const form = document.getElementById('battle-form');
+			const battleButton = document.getElementById('battle-button');
+			const player1Input = document.getElementById('player1');
+			const player2Input = document.getElementById('player2');
+			const loadingMessage = document.getElementById('loading-message');
+			const errorMessage = document.getElementById('error-message');
+			const resultsSection = document.getElementById('results');
+			const winnerLabel = document.getElementById('winner');
+
+			const player1Name = document.getElementById('player1-name');
+			const player2Name = document.getElementById('player2-name');
+			const player1Total = document.getElementById('player1-total');
+			const player2Total = document.getElementById('player2-total');
+			const player1Range = document.getElementById('player1-range');
+			const player2Range = document.getElementById('player2-range');
+			const player1Graph = document.getElementById('player1-graph');
+			const player2Graph = document.getElementById('player2-graph');
+
+			const showError = (message) => {
+				if (!errorMessage) return;
+				errorMessage.textContent = message;
+				errorMessage.hidden = false;
+			};
+
+			const clearError = () => {
+				if (!errorMessage) return;
+				errorMessage.hidden = true;
+				errorMessage.textContent = '';
+			};
+
+			const setLoading = (isLoading) => {
+				if (loadingMessage) {
+					loadingMessage.hidden = !isLoading;
+				}
+				if (battleButton) {
+					battleButton.disabled = isLoading;
+				}
+			};
+
+			const formatDateRange = (from, to) => {
+				if (!from || !to) return '-';
+				return `${from} to ${to}`;
+			};
+
+			const clearGraph = (container) => {
+				if (container) {
+					container.innerHTML = '';
+				}
+			};
+
+			const renderGraph = (container, weeks, colors) => {
+				if (!container) return;
+				container.innerHTML = '';
+				const palette = Array.isArray(colors) && colors.length >= 5 ? colors : fallbackPalette;
+
+				for (const week of weeks) {
+					const weekColumn = document.createElement('div');
+					weekColumn.className = 'week-column';
+
+					for (const day of week.contribution_days) {
+						const level = Math.max(0, Math.min(day.level, palette.length - 1));
+						const square = document.createElement('span');
+						square.className = 'day-square';
+						square.style.backgroundColor = palette[level];
+						square.title = `${day.count} contributions`;
+						weekColumn.appendChild(square);
+					}
+
+					container.appendChild(weekColumn);
+				}
+			};
+
+			const fetchPlayer = async (username) => {
+				const response = await fetch(`/api/contributions/${encodeURIComponent(username)}`);
+				const data = await response.json();
+
+				if (!response.ok) {
+					const message = typeof data?.message === 'string' ? data.message : `Could not fetch data for ${username}.`;
+					throw new Error(message);
+				}
+
+				if (typeof data?.total_contributions !== 'number' || !Array.isArray(data?.weeks)) {
+					throw new Error(`Unexpected data format for ${username}.`);
+				}
+
+				return {
+					username,
+					total: data.total_contributions,
+					from: data.from,
+					to: data.to,
+					weeks: data.weeks,
+					colors: Array.isArray(data.colors_full) ? data.colors_full : fallbackPalette,
+				};
+			};
+
+			const renderResults = (player1, player2) => {
+				if (player1Name) player1Name.textContent = player1.username;
+				if (player2Name) player2Name.textContent = player2.username;
+				if (player1Total) player1Total.textContent = String(player1.total);
+				if (player2Total) player2Total.textContent = String(player2.total);
+				if (player1Range) player1Range.textContent = formatDateRange(player1.from, player1.to);
+				if (player2Range) player2Range.textContent = formatDateRange(player2.from, player2.to);
+
+				renderGraph(player1Graph, player1.weeks, player1.colors);
+				renderGraph(player2Graph, player2.weeks, player2.colors);
+
+				if (winnerLabel) {
+					if (player1.total > player2.total) {
+						winnerLabel.textContent = `${player1.username} wins!`;
+					} else if (player2.total > player1.total) {
+						winnerLabel.textContent = `${player2.username} wins!`;
+					} else {
+						winnerLabel.textContent = "It's a draw!";
+					}
+				}
+
+				if (resultsSection) {
+					resultsSection.hidden = false;
+				}
+			};
+
+			const runBattle = async () => {
+				clearError();
+				clearGraph(player1Graph);
+				clearGraph(player2Graph);
+				if (resultsSection) {
+					resultsSection.hidden = true;
+				}
+
+				const player1 = player1Input?.value.trim() ?? '';
+				const player2 = player2Input?.value.trim() ?? '';
+
+				if (!player1 || !player2) {
+					showError('Please enter both usernames.');
+					return;
+				}
+
+				if (!usernamePattern.test(player1) || !usernamePattern.test(player2)) {
+					showError('Please enter valid GitHub usernames.');
+					return;
+				}
+
+				setLoading(true);
+				try {
+					const [player1Data, player2Data] = await Promise.all([
+						fetchPlayer(player1),
+						fetchPlayer(player2),
+					]);
+					renderResults(player1Data, player2Data);
+				} catch (error) {
+					showError(error instanceof Error ? error.message : 'Could not complete battle. Please try again.');
+				} finally {
+					setLoading(false);
+				}
+			};
+
+			form?.addEventListener('submit', async (event) => {
+				event.preventDefault();
+				await runBattle();
+			});
+
+			for (const input of [player1Input, player2Input]) {
+				input?.addEventListener('keydown', async (event) => {
+					if (event.key !== 'Enter') return;
+					event.preventDefault();
+					if (form?.requestSubmit) {
+						form.requestSubmit();
+					} else {
+						await runBattle();
+					}
+				});
+			}
+		</script>
+
+		<style>
+			:root {
+				color-scheme: dark;
+				--bg: #0a0a1a;
+				--bg-soft: #121229;
+				--panel: rgba(20, 20, 44, 0.9);
+				--border: rgba(95, 237, 131, 0.42);
+				--accent-green: #5fed83;
+				--accent-purple: #8a2be2;
+				--text: #e7f0ff;
+				--muted: #b9b5d6;
+				--danger: #ff5a7a;
+			}
+
+			* {
+				box-sizing: border-box;
+			}
+
+			body {
+				position: relative;
+				margin: 0;
+				min-height: 100vh;
+				font-family: 'Press Start 2P', 'Courier New', monospace;
+				font-size: 12px;
+				line-height: 1.7;
+				background:
+					radial-gradient(circle at 18% 12%, rgba(138, 43, 226, 0.17), transparent 32%),
+					radial-gradient(circle at 88% 18%, rgba(95, 237, 131, 0.2), transparent 30%),
+					var(--bg);
+				color: var(--text);
+				overflow-x: hidden;
+			}
+
+			body::before {
+				content: '';
+				position: fixed;
+				inset: 0;
+				pointer-events: none;
+				background: repeating-linear-gradient(
+					to bottom,
+					rgba(255, 255, 255, 0.05) 0px,
+					rgba(255, 255, 255, 0.05) 1px,
+					transparent 1px,
+					transparent 4px
+				);
+				opacity: 0.18;
+				z-index: 1;
+				animation: scanline-drift 8s linear infinite;
+			}
+
+			body::after {
+				content: '';
+				position: fixed;
+				inset: 0;
+				pointer-events: none;
+				z-index: 1;
+				background: radial-gradient(circle at center, transparent 45%, rgba(0, 0, 0, 0.45) 100%);
+			}
+
+			.arena {
+				position: relative;
+				z-index: 2;
+				max-width: 960px;
+				margin: 0 auto;
+				padding: 2.25rem 1rem 3rem;
+				display: grid;
+				gap: 1.1rem;
+			}
+
+			.hero h1 {
+				margin: 0 0 0.9rem;
+				font-size: clamp(1.15rem, 2.4vw, 1.6rem);
+				line-height: 1.4;
+				color: var(--accent-green);
+				text-shadow:
+					0 0 4px rgba(95, 237, 131, 0.6),
+					0 0 12px rgba(95, 237, 131, 0.8),
+					0 0 26px rgba(138, 43, 226, 0.45);
+				animation: neon-pulse 2.1s ease-in-out infinite;
+			}
+
+			.hero p {
+				margin: 0;
+				font-size: 0.72rem;
+				color: var(--muted);
+			}
+
+			.panel {
+				position: relative;
+				overflow: hidden;
+				background: var(--panel);
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 1rem;
+				box-shadow:
+					0 0 0 1px rgba(138, 43, 226, 0.25) inset,
+					0 0 28px rgba(0, 0, 0, 0.4);
+			}
+
+			.battle-form {
+				display: grid;
+				gap: 1rem;
+			}
+
+			.inputs {
+				display: grid;
+				grid-template-columns: 1fr;
+				gap: 0.75rem;
+			}
+
+			.field {
+				display: grid;
+				gap: 0.4rem;
+			}
+
+			label {
+				font-size: 0.66rem;
+				color: var(--accent-green);
+				font-weight: 600;
+				text-shadow: 0 0 8px rgba(95, 237, 131, 0.4);
+			}
+
+			input {
+				width: 100%;
+				padding: 0.75rem 0.8rem;
+				font-family: 'Press Start 2P', 'Courier New', monospace;
+				font-size: 0.7rem;
+				color: var(--text);
+				background: linear-gradient(180deg, rgba(15, 15, 40, 0.9), rgba(10, 10, 26, 0.95));
+				border: 1px solid rgba(138, 43, 226, 0.55);
+				border-radius: 8px;
+				outline: none;
+				animation: float-in 700ms ease both;
+			}
+
+			.field:first-child input {
+				animation-delay: 110ms;
+			}
+
+			.field:last-child input {
+				animation-delay: 240ms;
+			}
+
+			input::placeholder {
+				color: rgba(231, 240, 255, 0.45);
+			}
+
+			input:hover,
+			input:focus-visible {
+				border-color: var(--accent-green);
+				box-shadow:
+					0 0 0 1px rgba(95, 237, 131, 0.45),
+					0 0 16px rgba(95, 237, 131, 0.25);
+			}
+
+			button {
+				padding: 0.7rem 1rem;
+				font-family: 'Press Start 2P', 'Courier New', monospace;
+				font-size: 0.74rem;
+				font-weight: 700;
+				color: var(--bg);
+				background: linear-gradient(90deg, var(--accent-green), #89ffac);
+				border: none;
+				border-radius: 8px;
+				cursor: pointer;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+				box-shadow:
+					0 0 0 1px rgba(95, 237, 131, 0.55) inset,
+					0 0 18px rgba(95, 237, 131, 0.3);
+				transition: transform 160ms ease, box-shadow 160ms ease, filter 160ms ease;
+			}
+
+			button:hover {
+				transform: translateY(-1px);
+				box-shadow:
+					0 0 0 1px rgba(95, 237, 131, 0.75) inset,
+					0 0 24px rgba(95, 237, 131, 0.45);
+				filter: saturate(1.15);
+			}
+
+			button:disabled {
+				opacity: 0.6;
+				cursor: wait;
+				transform: none;
+			}
+
+			.status {
+				min-height: 3.25rem;
+			}
+
+			#loading-message {
+				margin: 0;
+				font-size: 0.68rem;
+				animation: loading-shift 1.2s linear infinite;
+			}
+
+			.error {
+				margin: 0;
+				font-size: 0.68rem;
+				color: var(--danger);
+				font-weight: 600;
+				text-shadow: 0 0 10px rgba(255, 90, 122, 0.4);
+			}
+
+			.results h2 {
+				margin-top: 0;
+				font-size: 0.92rem;
+				color: var(--accent-purple);
+				text-shadow: 0 0 14px rgba(138, 43, 226, 0.45);
+			}
+
+			.winner {
+				margin: 0 0 1rem;
+				font-size: 0.72rem;
+				font-weight: 700;
+				color: var(--accent-green);
+				text-shadow: 0 0 12px rgba(95, 237, 131, 0.45);
+			}
+
+			.battle-results-grid {
+				display: grid;
+				grid-template-columns: 1fr;
+				gap: 0.75rem;
+			}
+
+			.vs-badge {
+				display: grid;
+				place-items: center;
+				width: 52px;
+				height: 52px;
+				margin: 0 auto;
+				border-radius: 999px;
+				background: linear-gradient(125deg, var(--accent-purple), var(--accent-green), var(--accent-purple));
+				background-size: 220% 220%;
+				color: #f5fbff;
+				font-weight: 800;
+				font-size: 0.8rem;
+				box-shadow:
+					0 0 0 1px rgba(255, 255, 255, 0.18) inset,
+					0 0 14px rgba(138, 43, 226, 0.55),
+					0 0 26px rgba(95, 237, 131, 0.4);
+				animation: vs-gradient-shift 2.4s linear infinite, badge-breath 1.8s ease-in-out infinite;
+			}
+
+			.card {
+				position: relative;
+				overflow: hidden;
+				border: 1px solid #d9dde5;
+				border-radius: 8px;
+				padding: 0.9rem;
+				border-color: rgba(138, 43, 226, 0.45);
+				background: linear-gradient(160deg, rgba(19, 19, 44, 0.95), rgba(9, 9, 26, 0.94));
+				box-shadow:
+					0 0 0 1px rgba(138, 43, 226, 0.2) inset,
+					0 0 16px rgba(138, 43, 226, 0.14);
+			}
+
+			.card::before {
+				content: '';
+				position: absolute;
+				top: -140%;
+				left: -45%;
+				width: 56%;
+				height: 320%;
+				background: linear-gradient(
+					120deg,
+					transparent,
+					rgba(255, 255, 255, 0.08),
+					transparent
+				);
+				transform: rotate(14deg);
+				animation: card-shimmer 3.2s linear infinite;
+			}
+
+			.card h3 {
+				margin: 0;
+				font-size: 0.74rem;
+				color: var(--accent-green);
+			}
+
+			.card p {
+				margin: 0.3rem 0;
+				font-size: 0.62rem;
+				color: var(--muted);
+			}
+
+			.card strong {
+				color: var(--text);
+			}
+
+			.graph {
+				margin-top: 0.75rem;
+				display: flex;
+				gap: 2px;
+				overflow-x: auto;
+				padding-bottom: 0.25rem;
+				scrollbar-width: thin;
+				scrollbar-color: rgba(95, 237, 131, 0.5) transparent;
+			}
+
+			.graph::-webkit-scrollbar {
+				height: 8px;
+			}
+
+			.graph::-webkit-scrollbar-thumb {
+				background: linear-gradient(90deg, var(--accent-green), var(--accent-purple));
+				border-radius: 999px;
+			}
+
+			.week-column {
+				display: grid;
+				grid-template-rows: repeat(7, 10px);
+				gap: 2px;
+			}
+
+			.day-square {
+				display: block;
+				width: 10px;
+				height: 10px;
+				border-radius: 2px;
+				transition: transform 120ms ease, box-shadow 150ms ease, filter 120ms ease;
+			}
+
+			.day-square:hover {
+				transform: translateY(-1px) scale(1.2);
+				box-shadow:
+					0 0 6px rgba(95, 237, 131, 0.52),
+					0 0 12px rgba(138, 43, 226, 0.38);
+				filter: brightness(1.18);
+			}
+
+			@media (min-width: 720px) {
+				.inputs {
+					grid-template-columns: 1fr 1fr;
+				}
+
+				.battle-results-grid {
+					grid-template-columns: 1fr auto 1fr;
+					align-items: start;
+				}
+
+				.vs-badge {
+					margin-top: 2.25rem;
+				}
+			}
+
+			@keyframes neon-pulse {
+				0%,
+				100% {
+					text-shadow:
+						0 0 4px rgba(95, 237, 131, 0.55),
+						0 0 12px rgba(95, 237, 131, 0.8),
+						0 0 24px rgba(138, 43, 226, 0.38);
+				}
+				50% {
+					text-shadow:
+						0 0 6px rgba(95, 237, 131, 0.65),
+						0 0 18px rgba(95, 237, 131, 1),
+						0 0 32px rgba(138, 43, 226, 0.55);
+				}
+			}
+
+			@keyframes scanline-drift {
+				0% {
+					transform: translateY(0);
+				}
+				100% {
+					transform: translateY(4px);
+				}
+			}
+
+			@keyframes vs-gradient-shift {
+				0% {
+					background-position: 0% 50%;
+				}
+				100% {
+					background-position: 100% 50%;
+				}
+			}
+
+			@keyframes badge-breath {
+				0%,
+				100% {
+					transform: scale(1);
+				}
+				50% {
+					transform: scale(1.06);
+				}
+			}
+
+			@keyframes card-shimmer {
+				0% {
+					left: -52%;
+				}
+				100% {
+					left: 125%;
+				}
+			}
+
+			@keyframes float-in {
+				0% {
+					opacity: 0;
+					transform: translateY(10px);
+				}
+				100% {
+					opacity: 1;
+					transform: translateY(0);
+				}
+			}
+
+			@keyframes loading-shift {
+				0% {
+					color: var(--accent-green);
+					text-shadow: 0 0 12px rgba(95, 237, 131, 0.5);
+				}
+				50% {
+					color: var(--accent-purple);
+					text-shadow: 0 0 12px rgba(138, 43, 226, 0.55);
+				}
+				100% {
+					color: var(--accent-green);
+					text-shadow: 0 0 12px rgba(95, 237, 131, 0.5);
+				}
+			}
+
+			@media (prefers-reduced-motion: reduce) {
+				*,
+				*::before,
+				*::after {
+					animation: none !important;
+					transition: none !important;
+				}
+			}
+		</style>
 	</body>
 </html>
